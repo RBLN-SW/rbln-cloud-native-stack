@@ -1,0 +1,126 @@
+---
+# npu-operator.yaml — Installs the RBLN NPU Operator (Helm). The Operator installs the driver.
+#
+#   ansible-playbook npu-operator.yaml \
+#     -e @../values/rcns_values_<RCNS version>.yaml [-e kubeconfig=<path>] \
+#     [-e rbln_registry_username=<account> -e rbln_registry_password=<password>]
+- name: RCNS NPU Operator
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    kubeconfig: "{{ playbook_dir }}/../clm/kubespray/artifacts/admin.conf"
+    npu_namespace: rbln-system
+    npu_pull_secret: repo-rbln
+    npu_values: "{{ playbook_dir }}/../manifests/k8s/npu-operator-values.yaml"
+    npu_pkg: "{{ (stacks | default({})).get('rbln-npu-operator', {}) }}"
+    npu_chart: "{{ (npu_pkg.get('chart', {}).get('repoURL') | default('oci://registry-1.docker.io/rebellions', true)) ~ '/rbln-npu-operator-chart' }}"
+    npu_chart_version: "{{ npu_pkg.get('chart', {}).get('version') | default(components['rbln-operator'], true) }}"
+    npu_card: "{{ (stacks | default({})).card | default({}) }}"
+    npu_registries: "{{ npu_card | dict2items | map(attribute='value') | map(attribute='image') | map(attribute='registry') | unique | list }}"
+    npu_dra: "{{ enable_npu_dra | default(false) | bool }}"
+    npu_vm: "{{ enable_npu_vm_passthrough | default(false) | bool }}"
+  tasks:
+    - name: Require version pins and driver coordinates (values file)
+      ansible.builtin.assert:
+        that:
+          - components is defined and components['rbln-operator'] is defined
+          - npu_card | length > 0
+          - npu_card | dict2items | selectattr('value.image', 'defined') | list | length == npu_card | length
+          - npu_card | dict2items | map(attribute='value.image') | selectattr('tag', 'defined') | list | length == npu_card | length
+        fail_msg: >-
+          Values file required: -e @../values/rcns_values_<RCNS version>.yaml
+          (including registry, repository, and tag in stacks.card.<family>.image)
+
+    - name: Driver instances per NPU family (stacks.card.<family>)
+      ansible.builtin.set_fact:
+        npu_instances: >-
+          {{ npu_instances | default({}) | combine({item.key: {
+               'image': item.value.image,
+               'smd': {'image': item.value.smd | default({})},
+               'nodeSelector': {'rebellions.ai/npu.family': item.key}}}) }}
+      loop: "{{ npu_card | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}={{ item.value.image.tag }}"
+
+    - name: Values from the values file (family instances, option flags)
+      ansible.builtin.set_fact:
+        npu_overlay:
+          nfd:
+            enabled: "{{ enable_nfd | default(true) | bool }}"
+          driver:
+            deployDefault: false
+            instances: "{{ npu_instances }}"
+            upgradePolicy:
+              autoUpgrade: "{{ enable_driver_auto_upgrade | default(false) | bool }}"
+          devicePlugin:
+            enabled: "{{ not npu_dra }}"
+          draKubeletPlugin:
+            enabled: "{{ npu_dra }}"
+          sandboxDevicePlugin:
+            enabled: "{{ npu_vm and not npu_dra }}"
+          vfioManager:
+            enabled: "{{ npu_vm }}"
+          metricsExporter:
+            enabled: "{{ enable_metrics_exporter | default(true) | bool }}"
+
+    - name: Image pull secret from RBLN Portal account
+      when: (rbln_registry_username | default('')) | length > 0
+      no_log: true
+      ansible.builtin.shell: |
+        set -euo pipefail
+        K="kubectl --kubeconfig {{ kubeconfig }}"
+        $K create namespace {{ npu_namespace }} --dry-run=client -o yaml | $K apply -f -
+        $K create secret docker-registry {{ npu_pull_secret }} -n {{ npu_namespace }} \
+          --docker-server="{{ npu_registries | first }}" \
+          --docker-username="$REG_USER" --docker-password="$REG_PASS" \
+          --dry-run=client -o yaml | $K apply -f -
+      args:
+        executable: /bin/bash
+      environment:
+        REG_USER: "{{ rbln_registry_username }}"
+        REG_PASS: "{{ rbln_registry_password | default('') }}"
+      changed_when: true
+
+    - name: Check image pull secret (no account given)
+      when: (rbln_registry_username | default('')) | length == 0
+      ansible.builtin.command: >-
+        kubectl --kubeconfig {{ kubeconfig }} -n {{ npu_namespace }} get secret {{ npu_pull_secret }} -o name
+      register: npu_secret_check
+      changed_when: false
+      failed_when: false
+
+    - name: Warn — no image pull secret
+      when:
+        - (rbln_registry_username | default('')) | length == 0
+        - npu_secret_check.rc != 0
+      ansible.builtin.debug:
+        msg: >-
+          Image pull secret {{ npu_namespace }}/{{ npu_pull_secret }} is missing. If {{ npu_registries | join(', ') }}
+          requires authentication, the driver image cannot be pulled — rerun with -e rbln_registry_username=…
+          -e rbln_registry_password=… or create the secret manually.
+
+    - name: Write overlay values file
+      ansible.builtin.tempfile:
+        suffix: .npu-values.yaml
+      register: npu_overlay_file
+
+    - name: Render overlay values
+      ansible.builtin.copy:
+        dest: "{{ npu_overlay_file.path }}"
+        content: "{{ npu_overlay | to_nice_yaml(indent=2) }}"
+        mode: "0600"
+
+    - name: Install NPU Operator (helm)
+      ansible.builtin.command: >-
+        helm upgrade --install rbln-system {{ npu_chart }}
+        --version {{ npu_chart_version }}
+        -n {{ npu_namespace }} --create-namespace
+        -f {{ npu_values }} -f {{ npu_overlay_file.path }}
+        --kubeconfig {{ kubeconfig }} --wait --timeout 20m
+      changed_when: true
+
+    - name: Remove overlay values file
+      ansible.builtin.file:
+        path: "{{ npu_overlay_file.path }}"
+        state: absent

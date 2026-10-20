@@ -1,0 +1,129 @@
+---
+- name: Gather OS family
+  ansible.builtin.setup:
+    gather_subset: [ os_family ]
+
+- name: Compose effective package list (base + extras)
+  ansible.builtin.set_fact:
+    packages_all: "{{ packages + packages_extra }}"
+
+- name: Install software-properties-common for PPA management
+  ansible.builtin.apt:
+    name: software-properties-common
+    state: present
+    update_cache: true
+  register: packages_spc_install
+  retries: 3
+  delay: 20
+  until: packages_spc_install is succeeded
+  become: true
+  when:
+  - ansible_os_family == "Debian"
+  - ansible_distribution == "Ubuntu"
+  - repositories | length > 0
+
+- name: Add GPG keys for custom repositories (Ubuntu)
+  ansible.builtin.apt_key:
+    url: "{{ item.key_url }}"
+    keyring: "{{ item.keyring | default(omit) }}"
+    state: present
+  register: packages_apt_key
+  retries: 3
+  delay: 20
+  until: packages_apt_key is succeeded
+  become: true
+  when:
+  - ansible_os_family == "Debian"
+  - ansible_distribution == "Ubuntu"
+  - item.key_url is defined
+  loop: "{{ repositories }}"
+
+- name: Add custom repositories (Ubuntu)
+  ansible.builtin.apt_repository:
+    repo: "{{ item.repo }}"
+    state: "{{ item.state | default('present') }}"
+    update_cache: true
+  become: true
+  when:
+  - ansible_os_family == "Debian"
+  - ansible_distribution == "Ubuntu"
+  loop: "{{ repositories }}"
+
+- name: Add custom YUM repositories (RedHat/CentOS/Fedora)
+  ansible.builtin.yum_repository:
+    name: "{{ item.name }}"
+    description: "{{ item.description | default(item.name) }}"
+    baseurl: "{{ item.baseurl }}"
+    gpgcheck: "{{ item.gpgcheck | default(true) }}"
+    gpgkey: "{{ item.gpgkey | default(omit) }}"
+    enabled: "{{ item.enabled | default(true) }}"
+    state: "{{ item.state | default('present') }}"
+  become: true
+  when:
+  - ansible_os_family == "RedHat"
+  - item.baseurl is defined
+  loop: "{{ repositories }}"
+
+- name: Update package cache on Debian/Ubuntu
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  register: packages_apt_update
+  retries: 3
+  delay: 20
+  until: packages_apt_update is succeeded
+  become: true
+  when: ansible_os_family == "Debian" and packages_all | length > 0
+
+- name: Install packages on Debian/Ubuntu
+  ansible.builtin.apt:
+    name: "{{ packages_all | selectattr('apt', 'defined') | map(attribute='apt') | list }}"
+    state: present
+  register: packages_apt_install
+  retries: 3
+  delay: 20
+  until: packages_apt_install is succeeded
+  become: true
+  when: ansible_os_family == "Debian" and packages_all | length > 0
+
+- name: Install packages on RedHat/CentOS/Fedora
+  ansible.builtin.package:
+    name: "{{ packages_all | selectattr('yum', 'defined') | map(attribute='yum') | list }}"
+    state: present
+  register: packages_rhel_install
+  retries: 5
+  delay: 30
+  until: packages_rhel_install is succeeded
+  become: true
+  when: ansible_os_family == "RedHat" and packages_all | length > 0
+
+- name: Remove denied packages on Debian/Ubuntu
+  ansible.builtin.apt:
+    name: "{{ packages_denied | selectattr('apt', 'defined') | map(attribute='apt') | list }}"
+    state: absent
+    autoremove: true
+  become: true
+  when: ansible_os_family == "Debian" and packages_denied | length > 0
+
+- name: Remove denied packages on RedHat/CentOS/Fedora
+  ansible.builtin.package:
+    name: "{{ packages_denied | selectattr('yum', 'defined') | map(attribute='yum') | list }}"
+    state: absent
+  become: true
+  when: ansible_os_family == "RedHat" and packages_denied | length > 0
+
+- name: Configure alternatives for gcc/g++
+  community.general.alternatives:
+    name: gcc
+    link: /usr/bin/gcc
+    path: "{{ item.gcc_path }}"
+    priority: "{{ item.priority }}"
+    state: auto
+    slaves:
+    - name: g++
+      link: /usr/bin/g++
+      path: "{{ item.gxx_path }}"
+  become: true
+  loop:
+  - { gxx_path: '/usr/bin/g++-12', gcc_path: '/usr/bin/gcc-12', priority: 30 }
+  when: ansible_os_family == "Debian"

@@ -1,0 +1,43 @@
+# RCNS OpenShift 4.20 values file — only the values openshift-stack.yaml reads.
+# Validated on OpenShift 4.20.39. Use the file that matches the OpenShift minor version of the cluster.
+# To change install options (enable_* and so on), copy this file and edit it, or override with ansible-playbook -e.
+# For a mirror registry, change only registry and repository of image and smd under stacks.card.
+# Do not put the registry account (rbln_registry_*) in this file; pass it with ansible-playbook -e or an encrypted vars file.
+stacks:
+  card:
+    atom:
+      image:
+        registry: repo.rebellions.ai
+        repository: rebellions/rbln-driver
+        tag: 3.4.1
+        pullPolicy: IfNotPresent
+      smd:
+        registry: repo.rebellions.ai
+        repository: rebellions/rbln-smd
+    rebel100:
+      image:
+        registry: repo.rebellions.ai
+        repository: rebellions/rbln-driver
+        tag: 3.5.1
+        pullPolicy: IfNotPresent
+      smd:
+        registry: repo.rebellions.ai
+        repository: rebellions/rbln-smd
+  rbln-npu-operator:
+    olm:
+      package: rbln-npu-operator
+      channel: stable
+      version: 0.6.0
+      source: certified-operators
+components:
+  rbln-operator: 0.6.0
+  cert-manager: 1.17.0
+  istio: 1.28.0
+
+# ── Install options (defaults) ──
+rbln_registry_username: ""         # RBLN Portal account — creates the image pull secret (repo-rbln) for the driver and RSMD images
+rbln_registry_password: ""         # RBLN Portal password — pass it with -e or an encrypted vars file, not in this file
+enable_npu_operator: true          # RBLN NPU Operator (required — the Operator installs the driver)
+enable_nfd: true                   # Node Feature Discovery — required for the NPU family labels; set false if NFD already runs
+enable_cert_manager: false         # cert-manager (Helm)
+enable_istio: false                # Istio base and istiod (Helm)

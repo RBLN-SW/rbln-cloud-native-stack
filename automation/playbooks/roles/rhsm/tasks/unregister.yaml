@@ -1,0 +1,41 @@
+---
+- name: Check current RHSM registration
+  ansible.builtin.command:
+    cmd: subscription-manager identity
+  register: rhsm_identity_pre_unregister
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: Unregister from RHSM
+  ansible.builtin.command:
+    cmd: subscription-manager unregister
+  when: rhsm_identity_pre_unregister.rc == 0
+  become: true
+  changed_when: true
+
+- name: Remove local subscription data
+  ansible.builtin.command:
+    cmd: subscription-manager clean
+  become: true
+  changed_when: true
+
+- name: Remove leftover consumer and entitlement certificates
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      for d in /etc/pki/consumer /etc/pki/entitlement; do
+        [ -d "$d" ] && find "$d" -mindepth 1 -delete
+      done
+      true
+    executable: /bin/bash
+  become: true
+  changed_when: true
+
+- name: Assert the image is no longer registered
+  ansible.builtin.command:
+    cmd: subscription-manager identity
+  register: rhsm_identity_post_unregister
+  failed_when: rhsm_identity_post_unregister.rc == 0
+  changed_when: false
+  become: true

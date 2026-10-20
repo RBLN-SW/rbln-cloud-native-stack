@@ -1,0 +1,39 @@
+---
+# addons.yaml — Installs the optional stacks (cert-manager, Istio). Enable them with the enable_* flags in the values file.
+#
+#   ansible-playbook addons.yaml \
+#     -e @../values/rcns_values_<RCNS version>.yaml \
+#     [-e kubeconfig=<path>] [-e enable_cert_manager=true] [-e enable_istio=true]
+# On OpenShift, use ../values/rcns_openshift_values_<OpenShift version>.yaml as the values file.
+- name: RCNS add-ons
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    kubeconfig: "{{ playbook_dir }}/../clm/kubespray/artifacts/admin.conf"
+    enable_cert_manager: false
+    enable_istio: false
+    rcns_release_label: rcns.rebellions.ai/managed=true
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  tasks:
+    - name: Install cert-manager (helm)
+      when: enable_cert_manager | bool
+      ansible.builtin.shell: |
+        helm repo add jetstack https://charts.jetstack.io --force-update >/dev/null
+        helm upgrade --install cert-manager jetstack/cert-manager \
+          --version v{{ components['cert-manager'] }} --labels {{ rcns_release_label }} \
+          -n cert-manager --create-namespace --set crds.enabled=true --wait --timeout 10m
+      changed_when: true
+
+    - name: Install istio (helm)
+      when: enable_istio | bool
+      ansible.builtin.shell: |
+        helm repo add istio https://istio-release.storage.googleapis.com/charts --force-update >/dev/null
+        helm upgrade --install istio-base istio/base \
+          --version {{ components['istio'] }} --labels {{ rcns_release_label }} \
+          -n istio-system --create-namespace --wait
+        helm upgrade --install istiod istio/istiod \
+          --version {{ components['istio'] }} --labels {{ rcns_release_label }} \
+          -n istio-system --wait --timeout 10m
+      changed_when: true

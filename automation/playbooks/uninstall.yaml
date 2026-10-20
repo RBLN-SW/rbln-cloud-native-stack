@@ -1,0 +1,157 @@
+---
+# uninstall.yaml — Removes RCNS. Run the steps in this order.
+# Order (the cluster removal step sits in the middle):
+#   1) Remove the stacks:   ansible-playbook uninstall.yaml --tags stacks
+#   2) Remove the cluster:  for a Kubespray cluster, run Kubespray reset.yml
+#                         (the clm.kubespray tag in the values file — guides/ubuntu/install.md).
+#                         For a cluster created with other tools, follow that tool's procedure.
+#   3) Restore the nodes:   ansible-playbook -i hosts uninstall.yaml --tags nodes
+#
+#   Common arguments: -e @../values/rcns_values_<RCNS version>.yaml [-e kubeconfig=<path>]
+#
+# Caution: restoring the nodes unpins and removes packages and cleans up directories — do not run it
+# on nodes of a running cluster. Both Ubuntu and RHEL are supported. The pinned kernel is only unpinned
+# (hold, versionlock) and stays installed for boot safety — remove it manually if needed.
+
+- name: RCNS uninstall — stacks
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [stacks]
+  vars:
+    kubeconfig: "{{ playbook_dir }}/../clm/kubespray/artifacts/admin.conf"
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  tasks:
+    - name: Uninstall add-ons installed by RCNS (release label)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        removed=""
+        for ns_rel in istio-system/istiod istio-system/istio-base cert-manager/cert-manager; do
+          ns=${ns_rel%%/*}; rel=${ns_rel##*/}
+          managed=$(helm ls -n "$ns" -q -l rcns.rebellions.ai/managed=true)
+          if grep -qx "$rel" <<<"$managed"; then
+            helm uninstall "$rel" -n "$ns" --wait
+            removed="$removed $ns/$rel"
+          fi
+        done
+        echo "removed:${removed:- none}"
+      args:
+        executable: /bin/bash
+      register: rcns_addons_removed
+      changed_when: "'removed: none' not in rcns_addons_removed.stdout"
+
+    - name: Report add-ons kept (not installed by RCNS)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        for ns_rel in istio-system/istiod istio-system/istio-base cert-manager/cert-manager; do
+          ns=${ns_rel%%/*}; rel=${ns_rel##*/}
+          all=$(helm ls -n "$ns" -q)
+          if grep -qx "$rel" <<<"$all"; then echo "$ns/$rel"; fi
+        done
+      args:
+        executable: /bin/bash
+      register: rcns_addons_kept
+      changed_when: false
+
+    - name: Note releases left in place
+      when: rcns_addons_kept.stdout_lines | length > 0
+      ansible.builtin.debug:
+        msg: "Releases kept because they lack the RCNS label: {{ rcns_addons_kept.stdout_lines }} (treated as pre-existing)"
+
+    - name: Uninstall NPU Operator
+      ansible.builtin.shell: |
+        set -euo pipefail
+        releases=$(helm ls -n rbln-system -q)
+        if grep -qx rbln-system <<<"$releases"; then
+          helm uninstall rbln-system -n rbln-system --wait
+        fi
+        kubectl delete namespace rbln-system --ignore-not-found --timeout=180s
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+- name: RCNS uninstall — nodes
+  hosts: all
+  become: true
+  gather_facts: true
+  tags: [nodes]
+  vars:
+    uninstall_kernel: >-
+      {{ kernel_pin_version | default((kernel_pin_versions | default({})).get(
+           (ansible_distribution | lower | replace('redhat', 'rhel')) ~ '-' ~ ansible_distribution_version,
+           '6.8.0-138-generic'), true) }}
+  tasks:
+    - name: Unhold packages (kubernetes + pinned kernel) — Ubuntu
+      when: ansible_os_family == "Debian"
+      ansible.builtin.shell: |
+        for p in kubelet kubeadm kubectl \
+                 linux-image-{{ uninstall_kernel }} \
+                 linux-modules-{{ uninstall_kernel }} \
+                 linux-modules-extra-{{ uninstall_kernel }} \
+                 linux-headers-{{ uninstall_kernel }}; do
+          apt-mark unhold "$p" 2>/dev/null || true
+        done
+      changed_when: true
+
+    - name: Purge kubernetes and runtime packages (if present) — Ubuntu
+      when: ansible_os_family == "Debian"
+      ansible.builtin.apt:
+        name: [kubelet, kubeadm, kubectl, kubernetes-cni, containerd.io, containerd, cri-o, cri-o-runc]
+        state: absent
+        purge: true
+        autoremove: true
+      failed_when: false
+
+    - name: Remove apt repositories added for kubernetes — Ubuntu
+      when: ansible_os_family == "Debian"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/apt/sources.list.d/kubernetes.list
+        - /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+        - /etc/apt/keyrings/kubernetes-release.asc
+
+    - name: Release kernel versionlock (pinned kernel stays installed) — RHEL
+      when: ansible_os_family == "RedHat"
+      ansible.builtin.command: >-
+        dnf versionlock delete kernel kernel-core kernel-modules kernel-modules-core kernel-modules-extra
+      register: uninstall_versionlock
+      changed_when: uninstall_versionlock.rc == 0
+      failed_when: false
+
+    - name: Remove kubernetes and runtime packages (if present) — RHEL
+      when: ansible_os_family == "RedHat"
+      ansible.builtin.dnf:
+        name: [kubelet, kubeadm, kubectl, kubernetes-cni, containerd.io, containerd, cri-o]
+        state: absent
+      failed_when: false
+
+    - name: Remove yum repositories added for kubernetes — RHEL
+      when: ansible_os_family == "RedHat"
+      ansible.builtin.file:
+        path: /etc/yum.repos.d/kubernetes.repo
+        state: absent
+
+    - name: Remove cluster binaries left in /usr/local/bin
+      ansible.builtin.file:
+        path: "/usr/local/bin/{{ item }}"
+        state: absent
+      loop: [kubelet, kubeadm, kubectl, containerd, containerd-shim-runc-v2, ctr, runc, crictl, nerdctl]
+
+    - name: Cleanup directories (cluster·runtime leftovers)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/kubernetes
+        - /var/lib/kubelet
+        - /var/lib/etcd
+        - /etc/cni
+        - /opt/cni
+        - /etc/containerd
+        - /var/lib/containerd
+        - /etc/crio
+        - /var/lib/crio
+        - /root/.kube

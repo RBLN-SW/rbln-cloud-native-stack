@@ -1,0 +1,22 @@
+# RCNS hosts — node inventory. This is the only file to edit for the target environment.
+#
+# There are only two groups:
+#   [master] control plane nodes
+#   [nodes]  worker nodes (to run workloads on a control plane node, add the same line here too)
+#
+# Line format: <IP or hostname> ansible_user=<ssh user>
+# For a node with several NICs, append ip=<node IP> — the address kubelet, etcd, and the API server use.
+# To pin a different kernel on a node, append kernel_pin_version=<uname -r> (default: the values file or role default).
+# (Without ip=, the address of the default-route NIC is used, which fails where nodes reach each other only via another NIC.)
+# SSH key authentication is recommended (ssh-agent or ansible-playbook --private-key <key>).
+# For password authentication, append ansible_ssh_pass=... ansible_become_pass=...
+# to the line (requires sshpass).
+#
+# Do not list Kubespray groups (kube_control_plane and so on) here —
+# clm/kubespray/kubespray-groups.yaml maps master/nodes to them automatically.
+
+[master]
+192.0.2.10 ansible_user=REPLACE_WITH_YOUR_SSH_USER
+
+[nodes]
+192.0.2.11 ansible_user=REPLACE_WITH_YOUR_SSH_USER

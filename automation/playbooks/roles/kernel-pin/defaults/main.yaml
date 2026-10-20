@@ -1,0 +1,14 @@
+---
+kernel_pin_versions: {}
+kernel_pin_version: >-
+  {{ kernel_pin_versions.get(
+       ((ansible_distribution | default('')) | lower | replace('redhat', 'rhel'))
+       ~ '-' ~ (ansible_distribution_version | default('')),
+       '6.8.0-138-generic') }}
+kernel_pin_reboot_enabled: false
+kernel_pin_defer_reboot: false
+
+kernel_pin_purge_meta_packages:
+- "linux-generic-hwe-{{ ansible_distribution_version }}"
+- "linux-image-generic-hwe-{{ ansible_distribution_version }}"
+- "linux-headers-generic-hwe-{{ ansible_distribution_version }}"

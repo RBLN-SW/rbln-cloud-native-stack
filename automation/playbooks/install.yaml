@@ -1,0 +1,21 @@
+---
+# install.yaml — RCNS installation entry point (Kubernetes). For OpenShift, use openshift-stack.yaml.
+#
+#   ansible-playbook -i hosts install.yaml \
+#     -e @../values/rcns_values_<RCNS version>.yaml \
+#     [-e install_k8s=false -e kubeconfig=<path>] [-e container_runtime=crio] \
+#     [-e rbln_registry_username=<account> -e rbln_registry_password=<password>] [-e rcns_validation=true]
+- import_playbook: node-setup.yaml
+
+- import_playbook: k8s-install.yaml
+  when:
+    - install_k8s | default(true) | bool
+
+- import_playbook: npu-operator.yaml
+  when:
+    - enable_npu_operator | default(true) | bool
+
+- import_playbook: addons.yaml
+
+- import_playbook: validation.yaml
+  when: rcns_validation | default(false) | bool

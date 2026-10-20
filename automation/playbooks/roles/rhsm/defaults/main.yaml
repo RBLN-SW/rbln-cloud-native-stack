@@ -1,0 +1,7 @@
+---
+rhsm_org_id: "{{ lookup('ansible.builtin.env', 'RHSM_ORG_ID') or lookup('ansible.builtin.env', 'RHSM_ORG') }}"
+rhsm_activation_key: "{{ lookup('ansible.builtin.env', 'RHSM_ACTIVATION_KEY') }}"
+rhsm_release: "{{ ansible_distribution_version }}"
+rhsm_repos:
+- "rhel-{{ ansible_distribution_major_version }}-for-x86_64-baseos-eus-rpms"
+- "rhel-{{ ansible_distribution_major_version }}-for-x86_64-appstream-eus-rpms"

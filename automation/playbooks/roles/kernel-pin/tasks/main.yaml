@@ -1,0 +1,8 @@
+---
+- name: Pin kernel (Debian family)
+  ansible.builtin.include_tasks: debian.yaml
+  when: ansible_os_family == "Debian"
+
+- name: Pin kernel (RedHat family)
+  ansible.builtin.include_tasks: redhat.yaml
+  when: ansible_os_family == "RedHat"

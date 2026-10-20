@@ -1,0 +1,89 @@
+---
+- name: Decide whether the running kernel differs from the pin
+  ansible.builtin.set_fact:
+    kernel_pin_needs_reboot: "{{ ansible_kernel != kernel_pin_version + '.x86_64' }}"
+
+- name: Install the pinned kernel
+  ansible.builtin.dnf:
+    name:
+    - "kernel-{{ kernel_pin_version }}"
+    - "kernel-modules-{{ kernel_pin_version }}"
+    - "kernel-modules-core-{{ kernel_pin_version }}"
+    - "kernel-modules-extra-{{ kernel_pin_version }}"
+    state: present
+  register: kernel_pin_dnf_install
+  retries: 5
+  delay: 30
+  until: kernel_pin_dnf_install is succeeded
+  when: kernel_pin_needs_reboot | bool
+
+- name: Set the pinned kernel as the default boot entry
+  ansible.builtin.command:
+    cmd: grubby --set-default /boot/vmlinuz-{{ kernel_pin_version }}.x86_64
+  when: kernel_pin_needs_reboot | bool
+  changed_when: true
+
+- name: Reboot into the pinned kernel
+  ansible.builtin.reboot:
+    reboot_timeout: 600
+  when:
+    - kernel_pin_needs_reboot | bool
+    - not (kernel_pin_defer_reboot | bool)
+
+- name: Report deferred reboot
+  ansible.builtin.debug:
+    msg: >-
+      Installed pinned kernel {{ kernel_pin_version }} and set it as the default boot entry. The reboot is deferred
+      (kernel_pin_defer_reboot). Drain the node, reboot it manually, and rerun node-setup to verify the running
+      kernel and remove old kernels.
+  when:
+    - kernel_pin_needs_reboot | bool
+    - kernel_pin_defer_reboot | bool
+
+- name: Verify and clean up after the pinned kernel is running
+  when: not (kernel_pin_needs_reboot | bool and kernel_pin_defer_reboot | bool)
+  block:
+  - name: Re-read the running kernel after reboot
+    ansible.builtin.command: uname -r
+    register: rhel_kernel_uname
+    changed_when: false
+
+  - name: Assert the running kernel is the pinned NVR
+    ansible.builtin.assert:
+      that: rhel_kernel_uname.stdout == kernel_pin_version + '.x86_64'
+      fail_msg: >-
+        Running kernel {{ rhel_kernel_uname.stdout }} != pinned {{ kernel_pin_version }}.x86_64 —
+        grubby default did not take effect or the pinned kernel failed to boot.
+
+  - name: Remove old kernels after the pin reboot
+    ansible.builtin.shell:
+      cmd: |
+        set -euo pipefail
+        OLD=$(dnf repoquery --installonly --latest-limit=-1 -q)
+        if [ -z "$OLD" ]; then
+          echo unchanged
+        else
+          dnf -y remove $OLD
+          echo changed
+        fi
+      executable: /bin/bash
+    retries: 5
+    delay: 30
+    until: rhel_kernel_cleanup is succeeded
+    register: rhel_kernel_cleanup
+    changed_when: "'changed' in rhel_kernel_cleanup.stdout"
+
+- name: Install dnf versionlock plugin
+  ansible.builtin.dnf:
+    name: python3-dnf-plugin-versionlock
+    state: present
+  register: kernel_pin_versionlock_install
+  retries: 5
+  delay: 30
+  until: kernel_pin_versionlock_install is succeeded
+
+- name: Versionlock kernel packages
+  ansible.builtin.command:
+    cmd: dnf versionlock add kernel kernel-core kernel-modules kernel-modules-core kernel-modules-extra
+  register: rhel_kernel_versionlock
+  changed_when: "'Adding versionlock' in rhel_kernel_versionlock.stdout"

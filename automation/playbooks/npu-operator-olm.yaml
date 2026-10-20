@@ -1,0 +1,207 @@
+---
+# npu-operator-olm.yaml — Installs the RBLN NPU Operator on OpenShift (OLM). Usually called by openshift-stack.yaml.
+#
+#   ansible-playbook npu-operator-olm.yaml \
+#     -e @../values/rcns_openshift_values_<OpenShift version>.yaml -e kubeconfig=<OpenShift kubeconfig>
+- name: RCNS NPU Operator (OLM)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    kubeconfig: "{{ lookup('env', 'KUBECONFIG') }}"
+    npu_manifests: "{{ playbook_dir }}/../manifests/openshift"
+    npu_olm_timeout: 1200
+    npu_olm_catalog_grace: 120
+    npu_namespace: rbln-system
+    npu_pull_secret: repo-rbln
+    npu_olm: "{{ (stacks | default({})).get('rbln-npu-operator', {}).get('olm', {}) }}"
+    npu_driver_overrides: >-
+      {% set out = {} %}{% for fam, c in ((stacks | default({})).card | default({})).items() %}{% set _ = out.update({'rbln-driver-' ~ fam:
+         {'registry': c.image.registry, 'image': c.image.repository, 'version': c.image.tag | string,
+          'imagePullPolicy': c.image.pullPolicy | default('IfNotPresent'),
+          'imagePullSecrets': ['repo-rbln'],
+          'smd': {'registry': c.smd.registry, 'image': c.smd.repository}}}) %}{% endfor %}{{ out }}
+  tasks:
+    - name: Require values file (version pins + images)
+      ansible.builtin.assert:
+        that:
+          - components is defined and components['rbln-operator'] is defined
+          - stacks is defined and stacks.card is defined and stacks.card | length > 0
+        fail_msg: "Values file required: -e @../values/rcns_openshift_values_<OpenShift version>.yaml"
+
+    - name: Require OpenShift kubeconfig
+      ansible.builtin.assert:
+        that:
+          - kubeconfig | length > 0
+          - kubeconfig is file
+        fail_msg: "OpenShift kubeconfig required: -e kubeconfig=<path> or the KUBECONFIG environment variable (current: '{{ kubeconfig }}')"
+
+    - name: Install Red Hat NFD Operator
+      when: enable_nfd | default(true) | bool
+      ansible.builtin.command: kubectl --kubeconfig {{ kubeconfig }} apply -f {{ npu_manifests }}/nfd-operator.yaml
+      changed_when: true
+
+    - name: Wait for NFD Operator CSV
+      when: enable_nfd | default(true) | bool
+      ansible.builtin.shell: |
+        set -e
+        for i in $(seq 1 90); do
+          csv=$(kubectl --kubeconfig {{ kubeconfig }} -n openshift-nfd get sub nfd -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)
+          if [ -n "$csv" ] && [ "$(kubectl --kubeconfig {{ kubeconfig }} -n openshift-nfd get csv "$csv" -o jsonpath='{.status.phase}' 2>/dev/null)" = Succeeded ]; then exit 0; fi
+          sleep 10
+        done
+        echo "Timed out waiting for the NFD CSV" >&2; exit 1
+      changed_when: false
+
+    - name: Create NodeFeatureDiscovery
+      when: enable_nfd | default(true) | bool
+      ansible.builtin.command: kubectl --kubeconfig {{ kubeconfig }} apply -f {{ npu_manifests }}/nfd-cr.yaml
+      changed_when: true
+
+    - name: Load OLM manifests (Namespace · OperatorGroup · Subscription)
+      ansible.builtin.set_fact:
+        npu_olm_docs: "{{ lookup('file', npu_manifests ~ '/olm.yaml') | from_yaml_all | reject('none') | list }}"
+        npu_olm_version: "{{ npu_olm.get('version') | default('', true) }}"
+
+    - name: Apply the values file package source to the Subscription (source · channel · startingCSV)
+      ansible.builtin.set_fact:
+        npu_sub: >-
+          {{ (npu_olm_docs | selectattr('kind', 'equalto', 'Subscription') | first)
+             | combine({'spec': {
+                 'source': npu_olm.get('source') | default((npu_olm_docs | selectattr('kind', 'equalto', 'Subscription') | first).spec.source, true),
+                 'channel': npu_olm.get('channel') | default((npu_olm_docs | selectattr('kind', 'equalto', 'Subscription') | first).spec.channel, true),
+                 'startingCSV': ((npu_olm_docs | selectattr('kind', 'equalto', 'Subscription') | first).spec.name ~ '.v' ~ npu_olm_version)
+                                if npu_olm_version else (npu_olm_docs | selectattr('kind', 'equalto', 'Subscription') | first).spec.startingCSV
+               }}, recursive=True) }}
+
+    - name: Compose CatalogSource (values file catalog image — internal/mirror catalog only)
+      ansible.builtin.set_fact:
+        npu_catalog_docs: >-
+          {{ [] if not (npu_olm.get('catalog') | default('', true)) else [{
+               'apiVersion': 'operators.coreos.com/v1alpha1', 'kind': 'CatalogSource',
+               'metadata': {'name': npu_sub.spec.source, 'namespace': npu_sub.spec.sourceNamespace | default('openshift-marketplace')},
+               'spec': {'sourceType': 'grpc', 'image': npu_olm.catalog, 'displayName': 'RBLN NPU Operator (' ~ npu_sub.spec.source ~ ')',
+                        'updateStrategy': {'registryPoll': {'interval': npu_olm.get('pollInterval') | default('10m', true)}}}}] }}
+
+    - name: Subscribe NPU Operator (OLM)
+      ansible.builtin.command:
+        cmd: kubectl --kubeconfig {{ kubeconfig }} apply -f -
+        stdin: >-
+          {{ {'apiVersion': 'v1', 'kind': 'List',
+              'items': npu_catalog_docs + (npu_olm_docs | rejectattr('kind', 'equalto', 'Subscription') | list) + [npu_sub]} | to_json }}
+      changed_when: true
+
+    - name: Image pull secret from RBLN Portal account
+      when: (rbln_registry_username | default('')) | length > 0
+      no_log: true
+      ansible.builtin.shell: |
+        set -euo pipefail
+        K="kubectl --kubeconfig {{ kubeconfig }}"
+        $K create namespace {{ npu_namespace }} --dry-run=client -o yaml | $K apply -f -
+        $K create secret docker-registry {{ npu_pull_secret }} -n {{ npu_namespace }} \
+          --docker-server=repo.rebellions.ai \
+          --docker-username="$REG_USER" --docker-password="$REG_PASS" \
+          --dry-run=client -o yaml | $K apply -f -
+      args:
+        executable: /bin/bash
+      environment:
+        REG_USER: "{{ rbln_registry_username }}"
+        REG_PASS: "{{ rbln_registry_password | default('') }}"
+      changed_when: true
+
+    - name: Check image pull secret (no account given)
+      when: (rbln_registry_username | default('')) | length == 0
+      ansible.builtin.command: >-
+        kubectl --kubeconfig {{ kubeconfig }} -n {{ npu_namespace }} get secret {{ npu_pull_secret }} -o name
+      register: npu_secret_check
+      failed_when: false
+      changed_when: false
+
+    - name: Require image pull secret
+      when: (rbln_registry_username | default('')) | length == 0
+      ansible.builtin.assert:
+        that: npu_secret_check.rc == 0
+        fail_msg: >-
+          Image pull secret {{ npu_pull_secret }} is missing in {{ npu_namespace }} —
+          pass -e rbln_registry_username=<account> -e rbln_registry_password=<password> or create it manually.
+
+    - name: Approve the first InstallPlan and wait for the target CSV
+      ansible.builtin.shell: |
+        set -euo pipefail
+        K="kubectl --kubeconfig {{ kubeconfig }} -n rbln-system"
+        KM="kubectl --kubeconfig {{ kubeconfig }} -n {{ npu_sub.spec.sourceNamespace | default('openshift-marketplace') }}"
+        target="{{ npu_sub.spec.startingCSV }}"
+        src="{{ npu_sub.spec.source }}"
+        ready_at=""
+        for i in $(seq 1 {{ (npu_olm_timeout | int) // 10 }}); do
+          state=$($KM get catalogsource "$src" -o jsonpath='{.status.connectionState.lastObservedState}' 2>/dev/null || true)
+          if [ "$state" = READY ] && [ -z "$ready_at" ]; then ready_at=$(date +%s); fi
+          cond=$($K get sub rbln-npu-operator -o jsonpath='{range .status.conditions[?(@.type=="ResolutionFailed")]}{.status}|{.message}{end}' 2>/dev/null || true)
+          if [ "${cond%%|*}" = True ]; then
+            if [ -z "$ready_at" ] || [ $(( $(date +%s) - ready_at )) -lt {{ npu_olm_catalog_grace | int }} ]; then
+              if [ $(( i % 6 )) -eq 1 ]; then echo "catalog $src state=${state:-unknown} — waiting for OLM to resolve the subscription" >&2; fi
+              sleep 10; continue
+            fi
+            echo "Subscription resolution failed (catalog $src state=${state:-unknown}): ${cond#*|}" >&2
+            echo "Versions in the catalog: $(kubectl --kubeconfig {{ kubeconfig }} -n openshift-marketplace get packagemanifest rbln-npu-operator -o jsonpath='{.status.channels[*].entries[*].name}' 2>/dev/null)" >&2
+            exit 1
+          fi
+          plan=$($K get sub rbln-npu-operator -o jsonpath='{.status.installPlanRef.name}' 2>/dev/null || true)
+          if [ -n "$plan" ]; then
+            csvs=$($K get installplan "$plan" -o jsonpath='{.spec.clusterServiceVersionNames[*]}')
+            case " $csvs " in *" $target "*) ;; *) echo "InstallPlan $plan does not include the target $target ($csvs) — not approving" >&2; exit 1;; esac
+            if [ "$($K get installplan "$plan" -o jsonpath='{.spec.approved}')" != true ]; then
+              $K patch installplan "$plan" --type merge -p '{"spec":{"approved":true}}' >/dev/null
+              echo "approved $plan" >&2
+            fi
+          fi
+          csv=$($K get sub rbln-npu-operator -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)
+          if [ -n "$csv" ] && [ "$csv" != "$target" ]; then
+            echo "Installed CSV $csv != target $target — unvalidated version" >&2; exit 1
+          fi
+          if [ -n "$csv" ] && [ "$($K get csv "$csv" -o jsonpath='{.status.phase}' 2>/dev/null)" = Succeeded ]; then
+            echo "$csv"; exit 0
+          fi
+          sleep 10
+        done
+        echo "Timed out waiting for the NPU Operator CSV (target $target, catalog $src state=${state:-unknown})" >&2; exit 1
+      args:
+        executable: /bin/bash
+      register: npu_csv
+      changed_when: "'approved' in npu_csv.stderr"
+
+    - name: Read default CRs from the installed CSV (alm-examples)
+      ansible.builtin.command: >-
+        kubectl --kubeconfig {{ kubeconfig }} -n rbln-system get csv {{ npu_csv.stdout_lines | last }}
+        -o jsonpath={.metadata.annotations.alm-examples}
+      register: npu_alm
+      changed_when: false
+
+    - name: Require each family driver CR in the bundle
+      ansible.builtin.assert:
+        that: >-
+          npu_driver_overrides.keys() | difference(npu_alm.stdout | from_json | selectattr('kind', 'eq', 'RBLNDriver')
+          | map(attribute='metadata.name') | list) | length == 0
+        fail_msg: "Family CR not in the bundle alm-examples: {{ npu_driver_overrides.keys() | list }} — check the family keys in stacks.card of the values file"
+
+    - name: Merge image coordinates from the values file
+      ansible.builtin.set_fact:
+        npu_crs: >-
+          {{ npu_crs | default([]) + [item | combine({'spec': (item.spec | default({}))
+             | combine(npu_driver_overrides.get(item.metadata.name, {}) if item.kind == 'RBLNDriver' else {},
+                       recursive=True)})] }}
+      loop: "{{ npu_alm.stdout | from_json }}"
+      loop_control:
+        label: "{{ item.kind }}/{{ item.metadata.name }}"
+
+    - name: Apply RBLNDriver / RBLNClusterPolicy
+      ansible.builtin.command:
+        cmd: kubectl --kubeconfig {{ kubeconfig }} apply -f -
+        stdin: "{{ {'apiVersion': 'v1', 'kind': 'List', 'items': npu_crs} | to_json }}"
+      changed_when: true
+
+    - name: Wait for NPU Operator deployments
+      ansible.builtin.command: >-
+        kubectl --kubeconfig {{ kubeconfig }} -n rbln-system wait --for=condition=Available deploy --all
+        --timeout={{ npu_olm_timeout }}s
+      changed_when: false

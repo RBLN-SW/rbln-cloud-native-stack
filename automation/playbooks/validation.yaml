@@ -1,0 +1,181 @@
+---
+# validation.yaml — Validates the installation against the values file.
+#
+#   ansible-playbook validation.yaml \
+#     -e @../values/rcns_values_<RCNS version>.yaml [-e kubeconfig=<path>]
+- name: RCNS validation
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    kubeconfig: "{{ playbook_dir }}/../clm/kubespray/artifacts/admin.conf"
+    pods_ready_timeout: 900
+    npu_ready_timeout: 900
+    npu_alloc_check: "{{ not (enable_npu_dra | default(false) | bool) }}"
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  tasks:
+    - name: Require version pins (values file)
+      ansible.builtin.assert:
+        that: kubernetes_version is defined and components is defined
+        fail_msg: "Values file required: -e @../values/rcns_values_<RCNS version>.yaml"
+
+    - name: Check cluster is reachable
+      ansible.builtin.command: kubectl cluster-info
+      register: cluster_info
+      changed_when: false
+      failed_when: false
+
+    - name: Collect node states
+      ansible.builtin.shell: kubectl get nodes --no-headers | awk '{print $2}'
+      register: nodes_brief
+      changed_when: false
+      failed_when: false
+
+    - name: Collect node info (kubelet·runtime·kernel)
+      ansible.builtin.shell: >-
+        kubectl get nodes -o jsonpath='{range .items[*]}{.status.nodeInfo.kubeletVersion}{" "}{.status.nodeInfo.containerRuntimeVersion}{" "}{.status.nodeInfo.kernelVersion}{"\n"}{end}'
+      register: nodes_info
+      changed_when: false
+      failed_when: false
+
+    - name: Evaluate nodes vs target
+      ansible.builtin.set_fact:
+        node_total: "{{ nodes_brief.stdout_lines | default([]) | length }}"
+        ready_nodes: "{{ nodes_brief.stdout_lines | default([]) | select('eq', 'Ready') | list | length }}"
+        kubelet_installed: "{{ nodes_info.stdout_lines | default([]) | map('split') | map(attribute=0) | unique | list }}"
+        runtime_installed: "{{ nodes_info.stdout_lines | default([]) | map('split') | map(attribute=1) | unique | list }}"
+        kernel_installed: "{{ nodes_info.stdout_lines | default([]) | map('split') | map(attribute=2) | unique | list }}"
+
+    - name: Evaluate version mismatches
+      ansible.builtin.set_fact:
+        kubelet_mismatch: "{{ kubelet_installed | reject('eq', 'v' + (kubernetes_version | string)) | list }}"
+        runtime_mismatch: >-
+          {{ runtime_installed
+             | reject('in', ['containerd://' + (containerd_version | default('') | string),
+                             'cri-o://' + (crio_version | default('') | string)])
+             | list }}
+
+    - name: Collect NPU Operator release (helm)
+      ansible.builtin.shell: helm ls -n rbln-system -o json
+      register: helm_ls
+      changed_when: false
+      failed_when: false
+
+    - name: Evaluate NPU Operator chart vs target
+      ansible.builtin.set_fact:
+        operator_installed: >-
+          {{ (helm_ls.stdout | default('[]') | from_json)
+             | selectattr('name', 'eq', 'rbln-system') | map(attribute='chart') | first | default('(none)') }}
+        operator_base: "{{ components['rbln-operator'] }}"
+        operator_target: >-
+          rbln-npu-operator-chart-{{ ((stacks | default({})).get('rbln-npu-operator', {}).get('chart', {}).get('version'))
+          | default(components['rbln-operator'], true) }}
+
+    - name: Wait for rbln-system pods Ready (up to pods_ready_timeout)
+      ansible.builtin.command: >-
+        kubectl get pods -n rbln-system -o
+        jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.phase}{" "}{.spec.nodeName}{" "}{range .status.containerStatuses[*]}{.ready},{end}{"\n"}{end}'
+      register: pods_ready
+      changed_when: false
+      failed_when: false
+      retries: "{{ (pods_ready_timeout | int / 10) | int }}"
+      delay: 10
+      until: >-
+        pods_ready.rc == 0 and (pods_ready.stdout_lines | length) > 0 and
+        (pods_ready.stdout_lines | reject('search', '^\S+ Succeeded ')
+         | reject('match', '^\S+ Running \S+ (true,)+$') | list | length) == 0
+
+    - name: Collect rbln-system pods
+      ansible.builtin.command: kubectl get pods -n rbln-system -o json
+      register: pods_json
+      changed_when: false
+      failed_when: false
+
+    - name: Collect warning events (for diagnosing pods that do not converge)
+      ansible.builtin.shell: >-
+        kubectl get events -n rbln-system --field-selector type=Warning
+        --sort-by=.lastTimestamp 2>/dev/null | tail -5
+      register: warn_events
+      changed_when: false
+      failed_when: false
+
+    - name: Collect NPU nodes by family label
+      ansible.builtin.command: kubectl get nodes -l rebellions.ai/npu.family -o name
+      register: npu_label_nodes
+      changed_when: false
+      failed_when: false
+
+    - name: Evaluate rbln-system pods
+      ansible.builtin.set_fact:
+        pods_bad: >-
+          {{ ['collection failed (kubectl get pods rc=' ~ pods_ready.rc ~ ')'] if pods_ready.rc != 0 else
+             (pods_ready.stdout_lines | reject('search', '^\S+ Succeeded ')
+              | reject('match', '^\S+ Running \S+ (true,)+$')
+              | map('regex_replace', '^(\S+) (\S+) \S* ?(.*)$', '\1=\2(ready \3)') | list) }}
+        npu_nodes: >-
+          {{ (pods_ready.stdout_lines | default([]) | select('match', '^rbln-driver-\S+ \S+ \S+')
+              | map('split') | map(attribute=2) | list)
+             | union(npu_label_nodes.stdout_lines | default([]) | map('regex_replace', '^node/', '') | list)
+             | unique | sort | list }}
+        images_installed: >-
+          {{ (pods_json.stdout | default('{"items":[]}', true) | from_json)['items']
+             | map(attribute='spec.containers') | flatten | map(attribute='image') | unique | sort }}
+
+    - name: Wait for NPU allocatable on every NPU node (up to npu_ready_timeout)
+      ansible.builtin.command: >-
+        kubectl get nodes -o
+        jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.allocatable.rebellions\.ai/npu}{"\n"}{end}'
+      register: npu_nodes_alloc
+      changed_when: false
+      failed_when: false
+      retries: "{{ (npu_ready_timeout | int / 20) | int if (npu_nodes | length > 0 and npu_alloc_check | bool) else 0 }}"
+      delay: 20
+      until: >-
+        npu_nodes | length == 0 or not (npu_alloc_check | bool) or
+        (npu_nodes | difference(npu_nodes_alloc.stdout_lines | default([])
+          | select('match', '^\S+ [1-9][0-9]*$') | map('regex_replace', ' .*$', '') | list)
+         | length) == 0
+
+    - name: Evaluate NPU allocatable
+      ansible.builtin.set_fact:
+        npu_alloc_by_node: >-
+          {{ npu_nodes_alloc.stdout_lines | default([]) | map('regex_replace', '^(\S+) ?$', '\1 0')
+             | map('replace', ' ', '=') | list }}
+        npu_alloc_total: >-
+          {{ npu_nodes_alloc.stdout_lines | default([]) | map('regex_replace', '^\S+ ?', '')
+             | map('int') | sum }}
+        npu_zero_nodes: >-
+          {{ [] if not (npu_alloc_check | bool) else
+             npu_nodes | difference(npu_nodes_alloc.stdout_lines | default([])
+             | select('match', '^\S+ [1-9][0-9]*$') | map('regex_replace', ' .*$', '') | list) }}
+
+    - name: Report Target vs Installed
+      ansible.builtin.debug:
+        msg:
+          - "cluster reachable      : {{ 'ok' if cluster_info.rc == 0 else 'FAIL' }}"
+          - "nodes Ready            : {{ ready_nodes }}/{{ node_total }}"
+          - "kubelet    target v{{ kubernetes_version }} / installed: {{ kubelet_installed }} / mismatch: {{ kubelet_mismatch }}"
+          - "runtime    target containerd {{ containerd_version | default('—') }} · crio {{ crio_version | default('—') }} / installed: {{ runtime_installed | default(['collection failed']) }}"
+          - "kernel     installed: {{ kernel_installed | default(['collection failed']) }} (report only — the pin depends on the environment)"
+          - "operator   target {{ operator_target }} / installed: {{ operator_installed }}{{ '' if operator_target == 'rbln-npu-operator-chart-' ~ operator_base else ' (default components.rbln-operator ' ~ operator_base ~ ' overridden by stacks.rbln-npu-operator in the values file)' }}"
+          - "pods(rbln-system) not running: {{ pods_bad | default(['collection failed']) }}"
+          - "warning events (last 5)  : {{ warn_events.stdout_lines | default([]) }}"
+          - "images(rbln-system)    : {{ images_installed | default([]) }}"
+          - "components target      : {{ components }}"
+          - "NPU allocatable        : {{ ('check skipped (enable_npu_dra — DRA does not use allocatable)') if not (npu_alloc_check | bool) else (npu_alloc_total | string) ~ ' — per node ' ~ (npu_alloc_by_node | string) ~ ('' if npu_nodes | length > 0 else '  (no driver pods or family labels = no NPU installed — functional check skipped)') }}"
+          - "NPU nodes (driver pods ∪ labels) : {{ npu_nodes }} / allocatable 0 : {{ npu_zero_nodes }}"
+
+    - name: Validation verdict
+      ansible.builtin.assert:
+        that:
+          - cluster_info.rc == 0
+          - (node_total | int) > 0
+          - (ready_nodes | int) == (node_total | int)
+          - kubelet_mismatch | length == 0
+          - runtime_mismatch | length == 0
+          - operator_installed == operator_target
+          - pods_bad | length == 0
+          - npu_zero_nodes | length == 0
+        fail_msg: "RCNS validation failed — check the mismatched items in the Target vs Installed report above."
+        success_msg: "RCNS validation passed — the stack matches the values file (rcns_version {{ rcns_version | default('?') }})."

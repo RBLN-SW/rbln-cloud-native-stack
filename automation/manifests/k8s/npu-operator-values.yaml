@@ -1,0 +1,75 @@
+namespace: rbln-system
+
+podDefaults:
+  tolerations:
+    - operator: Exists
+      effect: NoSchedule
+
+operator:
+  tolerations:
+    - operator: Exists
+      effect: NoSchedule
+
+nfd:
+  enabled: true
+
+node-feature-discovery:
+  worker:
+    tolerations:
+      - operator: Exists
+        effect: NoSchedule
+  gc:
+    tolerations:
+      - operator: Exists
+        effect: NoSchedule
+    config:
+      core:
+        labelSources:
+          - "local"
+          - "kernel"
+          - "pci"
+          - "network"
+          - "system"
+
+driver:
+  enabled: true
+  imagePullSecrets:
+    - repo-rbln
+  upgradePolicy:
+    autoUpgrade: true
+    maxParallelUpgrades: 1
+    waitForCompletion:
+      timeoutSeconds: 0
+      podSelector: ""
+    npuPodDeletion:
+      force: false
+      timeoutSeconds: 300
+  nodeSelector: {}
+  tolerations:
+    - operator: Exists
+      effect: NoSchedule
+  annotations: {}
+  env: []
+
+devicePlugin:
+  enabled: true
+
+draKubeletPlugin:
+  enabled: false
+
+npuFeatureDiscovery:
+  enabled: true
+
+containerToolkit:
+  enabled: true
+
+sandboxDevicePlugin:
+  enabled: true
+  resourceList:
+    - productCardNames:
+        - RBLN-CR03
+      resourceName: REBEL_VFIO
+      resourcePrefix: rebellions.ai
+
+vfioManager:
+  enabled: true

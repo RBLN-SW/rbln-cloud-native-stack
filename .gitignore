@@ -1,0 +1,19 @@
+# OS and editor files
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Files created by running the playbooks — do not commit
+automation/clm/kubespray/kubespray/
+automation/clm/kubespray/.venv/
+automation/clm/kubespray/artifacts/
+automation/clm/kubespray/kubespray-install.log
+.venv/
+
+# Copied values files and credentials (may contain passwords)
+automation/playbooks/my-values*.yaml
+automation/playbooks/*-values*.yaml
+automation/playbooks/portal*.yaml
+*.kubeconfig
+kubeconfig*

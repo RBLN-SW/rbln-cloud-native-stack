@@ -1,0 +1,18 @@
+# kubespray-groups.yaml — Maps master/nodes in hosts to Kubespray groups (no edits needed).
+all:
+  children:
+    kube_control_plane:
+      children:
+        master: {}
+    etcd:
+      children:
+        master: {}
+    kube_node:
+      children:
+        nodes: {}
+    k8s_cluster:
+      children:
+        kube_control_plane: {}
+        kube_node: {}
+    calico_rr:
+      hosts: {}

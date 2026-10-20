@@ -1,0 +1,50 @@
+---
+- name: Assert RHSM credentials are provided
+  ansible.builtin.assert:
+    that:
+    - rhsm_org_id | length > 0
+    - rhsm_activation_key | length > 0
+    fail_msg: >-
+      rhsm_org_id / rhsm_activation_key are required. Export
+      RHSM_ORG_ID (or RHSM_ORG) and RHSM_ACTIVATION_KEY, or pass them
+      via extra-vars.
+
+- name: Check current RHSM registration
+  ansible.builtin.command:
+    cmd: subscription-manager identity
+  register: rhsm_identity
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: Register with activation key
+  ansible.builtin.command:
+    argv:
+    - subscription-manager
+    - register
+    - "--org={{ rhsm_org_id }}"
+    - "--activationkey={{ rhsm_activation_key }}"
+  when: rhsm_identity.rc != 0
+  become: true
+  no_log: true
+  changed_when: true
+
+- name: Pin minor release stream
+  ansible.builtin.command:
+    cmd: "subscription-manager release --set={{ rhsm_release }}"
+  when: rhsm_release | length > 0
+  become: true
+  changed_when: true
+
+- name: Enable additional repos
+  ansible.builtin.command:
+    argv: "{{ ['subscription-manager', 'repos'] + (rhsm_repos | map('regex_replace', '^', '--enable=') | list) }}"
+  when: rhsm_repos | length > 0
+  become: true
+  changed_when: true
+
+- name: Clean dnf cache after registration
+  ansible.builtin.command:
+    cmd: dnf clean all
+  become: true
+  changed_when: true

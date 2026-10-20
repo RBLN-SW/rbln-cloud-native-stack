@@ -1,0 +1,134 @@
+---
+- name: Refresh apt cache (fail fast when the mirror is unreachable)
+  ansible.builtin.command:
+    cmd: >-
+      timeout 120 apt-get update
+      -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 -o Acquire::Retries=1
+  become: true
+  changed_when: false
+  register: kernel_pin_apt_update
+  failed_when: false
+
+- name: Fail when the package mirror is unreachable
+  ansible.builtin.fail:
+    msg: |
+      apt-get update failed (rc={{ kernel_pin_apt_update.rc }}) — cannot reach the mirror for pinned kernel {{ kernel_pin_version }}.
+      Check on the node: `resolvectl status` (is DNS answering?), reachability of the mirrors in /etc/apt/sources.list*,
+      and proxy/firewall settings. If the cluster CIDR overlaps the node network (DNS server address), local IPVS intercepts DNS.
+      {{ (kernel_pin_apt_update.stderr_lines | default([]))[-5:] | join('\n') }}
+  when: kernel_pin_apt_update.rc != 0
+
+- name: Install pinned kernel packages
+  ansible.builtin.apt:
+    name:
+    - "linux-image-{{ kernel_pin_version }}"
+    - "linux-modules-{{ kernel_pin_version }}"
+    - "linux-modules-extra-{{ kernel_pin_version }}"
+    - "linux-headers-{{ kernel_pin_version }}"
+    state: present
+    update_cache: false
+    allow_downgrade: true
+  register: kernel_pin_apt_install
+  retries: 3
+  delay: 20
+  until: kernel_pin_apt_install is succeeded
+  become: true
+
+- name: Hold pinned kernel packages
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop:
+  - "linux-image-{{ kernel_pin_version }}"
+  - "linux-modules-{{ kernel_pin_version }}"
+  - "linux-modules-extra-{{ kernel_pin_version }}"
+  - "linux-headers-{{ kernel_pin_version }}"
+  become: true
+
+- name: Unhold HWE kernel meta-packages (may be held by prior runs)
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: install
+  loop: "{{ kernel_pin_purge_meta_packages }}"
+  become: true
+  failed_when: false
+
+- name: Preview HWE purge + autoremove plan (apt simulate)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      apt-get -s purge -y --autoremove {{ kernel_pin_purge_meta_packages | join(' ') }} 2>&1 \
+        | grep -E "^(Remv|Purg) " || true
+    executable: /bin/bash
+  become: true
+  changed_when: false
+  register: kernel_pin_autoremove_preview
+
+- name: Fail if autoremove plan would touch pinned kernel packages
+  ansible.builtin.fail:
+    msg: |
+      apt autoremove plan would remove a pinned kernel package
+      (linux-{image,modules,modules-extra,headers}-{{ kernel_pin_version }}).
+      Proceeding would cause vmlinuz↔modules ABI mismatch on next boot.
+
+      Plan:
+      {{ kernel_pin_autoremove_preview.stdout }}
+  when: >-
+    ('linux-image-' ~ kernel_pin_version) in kernel_pin_autoremove_preview.stdout
+    or ('linux-modules-' ~ kernel_pin_version) in kernel_pin_autoremove_preview.stdout
+    or ('linux-headers-' ~ kernel_pin_version) in kernel_pin_autoremove_preview.stdout
+
+- name: Purge HWE kernel meta-packages and autoremove pulled kernels
+  ansible.builtin.apt:
+    name: "{{ kernel_pin_purge_meta_packages }}"
+    state: absent
+    purge: true
+    autoremove: true
+  become: true
+
+- name: Verify pinned kernel package builds are consistent
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      KVER='{{ kernel_pin_version }}'
+      IMG_VER=$(dpkg-query -W -f='${Version}' "linux-image-$KVER")
+      MOD_VER=$(dpkg-query -W -f='${Version}' "linux-modules-$KVER")
+      EXT_VER=$(dpkg-query -W -f='${Version}' "linux-modules-extra-$KVER")
+      HDR_VER=$(dpkg-query -W -f='${Version}' "linux-headers-$KVER")
+      echo "linux-image=$IMG_VER"
+      echo "linux-modules=$MOD_VER"
+      echo "linux-modules-extra=$EXT_VER"
+      echo "linux-headers=$HDR_VER"
+      if [ "$IMG_VER" != "$MOD_VER" ] || [ "$IMG_VER" != "$EXT_VER" ]; then
+        echo "ERROR: linux-image / linux-modules / linux-modules-extra build numbers differ." >&2
+        echo "This will cause vermagic mismatch (disagrees about version of symbol) on boot." >&2
+        exit 1
+      fi
+      test -d "/lib/modules/$KVER" || { echo "ERROR: /lib/modules/$KVER missing" >&2; exit 1; }
+      test -f "/boot/vmlinuz-$KVER" || { echo "ERROR: /boot/vmlinuz-$KVER missing" >&2; exit 1; }
+    executable: /bin/bash
+  become: true
+  changed_when: false
+  register: kernel_pin_verify
+
+- name: Show pinned kernel package versions
+  ansible.builtin.debug:
+    var: kernel_pin_verify.stdout_lines
+
+- name: Set GRUB_DEFAULT to pinned kernel
+  ansible.builtin.lineinfile:
+    path: /etc/default/grub
+    regexp: '^GRUB_DEFAULT='
+    line: 'GRUB_DEFAULT="Advanced options for Ubuntu>Ubuntu, with Linux {{ kernel_pin_version }}"'
+    backup: true
+  become: true
+  notify:
+  - Update GRUB
+  - Update initramfs
+  - Reboot after kernel pin
+  - Wait out the reboot that was already in flight
+  - Re-read the running kernel after the in-flight reboot
+  - Assert the in-flight reboot landed on the pinned kernel
+
+- name: Apply queued GRUB/initramfs handlers before any mid-play reboot
+  ansible.builtin.meta: flush_handlers

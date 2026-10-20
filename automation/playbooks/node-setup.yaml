@@ -1,0 +1,70 @@
+---
+# node-setup.yaml — Prepares the nodes (kernel pinning, base packages). install.yaml runs it first.
+#
+#   ansible-playbook -i hosts node-setup.yaml \
+#     -e @../values/rcns_values_<RCNS version>.yaml
+- name: RCNS node setup
+  hosts: all
+  become: true
+  gather_facts: false
+  serial: "{{ node_setup_serial | default('100%' if (install_k8s | default(true) | bool) else 1) }}"
+  vars:
+    kernel_pin_reboot_enabled: true
+    kernel_pin_defer_reboot: "{{ not (kernel_pin_reboot_enabled | bool) }}"
+    rhsm_enabled: "{{ lookup('ansible.builtin.env', 'RHSM_ACTIVATION_KEY') | length > 0 }}"
+  pre_tasks:
+    - name: Wait for SSH to come up
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+        sleep: 5
+    - name: Gather facts (after the connection is up)
+      ansible.builtin.setup:
+    - name: Wait for cloud-init to finish
+      ansible.builtin.shell: >-
+        command -v cloud-init >/dev/null 2>&1 && timeout 600 cloud-init status --wait || true
+      changed_when: false
+      tags: always
+    - name: Register with RHSM before any dnf work
+      ansible.builtin.include_role:
+        name: rhsm
+        apply: { tags: rhsm }
+      when: ansible_os_family == "RedHat" and rhsm_enabled | bool
+      tags: rhsm
+    - name: Pre-import Red Hat release GPG key (librepo pgpParsePkts bug bypass)
+      ansible.builtin.command:
+        cmd: rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release
+      changed_when: false
+      when: ansible_os_family == "RedHat"
+  roles:
+    - kernel-pin
+    - { role: packages, when: ansible_os_family == "Debian" }
+  tasks:
+    - name: Apply RHEL node baseline (SELinux, firewalld, NetworkManager)
+      when: ansible_os_family == "RedHat"
+      block:
+        - name: Set SELinux to permissive (persistent)
+          ansible.builtin.lineinfile:
+            path: /etc/selinux/config
+            regexp: '^SELINUX='
+            line: SELINUX=permissive
+        - name: Set SELinux to permissive (running)
+          ansible.builtin.command: setenforce 0
+          register: rhel_setenforce
+          changed_when: rhel_setenforce.rc == 0
+          failed_when: false
+        - name: Disable firewalld if present
+          ansible.builtin.systemd_service:
+            name: firewalld.service
+            enabled: false
+            state: stopped
+          register: rhel_firewalld_disable
+          failed_when:
+            - rhel_firewalld_disable is failed
+            - "'Could not find the requested service' not in (rhel_firewalld_disable.msg | default(''))"
+        - name: Keep NetworkManager away from CNI-managed interfaces
+          ansible.builtin.copy:
+            dest: /etc/NetworkManager/conf.d/99-rbln-cni-unmanaged.conf
+            mode: "0644"
+            content: |
+              [keyfile]
+              unmanaged-devices=interface-name:cali*;interface-name:vxlan.calico;interface-name:vxlan-v6.calico

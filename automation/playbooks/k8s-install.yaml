@@ -1,0 +1,86 @@
+---
+# k8s-install.yaml — Installs a Kubernetes cluster with Kubespray. install.yaml calls it when install_k8s is true.
+#
+#   ansible-playbook -i hosts k8s-install.yaml -e @../values/rcns_values_<RCNS version>.yaml [-e container_runtime=crio]
+- name: RCNS Kubernetes install (kubespray)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ks_dir: "{{ playbook_dir }}/../clm/kubespray"
+    ks_tag: "{{ (clm | default({})).kubespray | default('') }}"
+    ks_runtime: "{{ container_runtime | default('containerd') }}"
+    ks_vars_file: "{{ ks_dir }}/vars/kubespray-vars_{{ rcns_version | default('') }}.yaml"
+    ks_log: "{{ ks_dir }}/kubespray-install.log"
+    ks_runtime_version: "{{ containerd_version if ks_runtime == 'containerd' else crio_version }}"
+  tasks:
+    - name: Require values file (kubespray tag · versions · runtime)
+      ansible.builtin.assert:
+        that:
+          - rcns_version is defined
+          - ks_tag | length > 0
+          - ks_runtime in ['containerd', 'crio']
+          - ks_runtime != 'containerd' or containerd_version is defined
+          - ks_runtime != 'crio' or crio_version is defined
+        fail_msg: >-
+          Values file required: -e @../values/rcns_values_<RCNS version>.yaml
+          (clm.kubespray, containerd_version|crio_version, container_runtime = containerd | crio)
+
+    - name: Require kubespray vars file for this RCNS version
+      ansible.builtin.stat:
+        path: "{{ ks_vars_file }}"
+      register: ks_vars_stat
+    - ansible.builtin.assert:
+        that: ks_vars_stat.stat.exists
+        fail_msg: "Kubespray vars file not found: {{ ks_vars_file }}"
+
+    - name: Fetch kubespray {{ ks_tag }}
+      ansible.builtin.command:
+        cmd: git clone --depth 1 --branch {{ ks_tag }} https://github.com/kubernetes-sigs/kubespray.git kubespray
+        chdir: "{{ ks_dir }}"
+        creates: "{{ ks_dir }}/kubespray/cluster.yml"
+
+    - name: Check kubespray checkout tag
+      ansible.builtin.command:
+        cmd: git describe --tags --exact-match
+        chdir: "{{ ks_dir }}/kubespray"
+      register: ks_checkout
+      changed_when: false
+      failed_when: ks_checkout.stdout != ks_tag
+
+    - name: Python venv for kubespray
+      ansible.builtin.command:
+        cmd: python3 -m venv .venv
+        chdir: "{{ ks_dir }}"
+        creates: "{{ ks_dir }}/.venv/bin/activate"
+
+    - name: Install kubespray requirements
+      ansible.builtin.command:
+        cmd: "{{ ks_dir }}/.venv/bin/pip install -q -r kubespray/requirements.txt"
+        chdir: "{{ ks_dir }}"
+      changed_when: false
+
+    - name: Run kubespray cluster.yml (log — clm/kubespray/kubespray-install.log)
+      ansible.builtin.shell: |
+        set -o pipefail
+        "{{ ks_dir }}/.venv/bin/ansible-playbook" \
+          -i "{{ playbook_dir }}/hosts" -i "{{ ks_dir }}/kubespray-groups.yaml" -b \
+          -e "@{{ ks_vars_file }}" \
+          -e container_manager={{ ks_runtime }} -e {{ ks_runtime }}_version={{ ks_runtime_version }} \
+          -e artifacts_dir="{{ ks_dir }}/artifacts" \
+          cluster.yml > "{{ ks_log }}" 2>&1
+      args:
+        chdir: "{{ ks_dir }}/kubespray"
+        executable: /bin/bash
+      register: ks_run
+      changed_when: true
+      failed_when: false
+
+    - name: kubespray failed — last log lines
+      when: ks_run.rc != 0
+      ansible.builtin.fail:
+        msg: "{{ lookup('pipe', 'tail -n 40 ' ~ ks_log) }}"
+
+    - name: Kubeconfig
+      ansible.builtin.debug:
+        msg: "Cluster installed — kubeconfig: {{ ks_dir }}/artifacts/admin.conf (runtime {{ ks_runtime }})"

@@ -1,0 +1,68 @@
+---
+repositories: []
+
+packages:
+- { apt: universal-ctags, yum: ctags }
+- { apt: ccache, yum: ccache }
+- { apt: cmake, yum: cmake }
+- { apt: g++-12, yum: gcc-toolset-12 }
+- { apt: gdb, yum: gdb }
+- { apt: git, yum: git }
+- { apt: lldb, yum: lldb }
+- { apt: llvm, yum: llvm }
+- { apt: python3-venv, yum: python3 }
+- { apt: patchelf, yum: patchelf }
+- { apt: chrpath, yum: chrpath }
+
+- { apt: htop, yum: htop }
+- { apt: vim, yum: vim }
+- { apt: pigz, yum: pigz }
+- { apt: pbzip2, yum: pbzip2 }
+- { apt: xz-utils, yum: xz }
+- { apt: zsh, yum: zsh }
+- { apt: tmux, yum: tmux }
+- { apt: rsyslog, yum: rsyslog }
+
+- { apt: libbz2-dev, yum: bzip2-devel }
+- { apt: libcmocka-dev, yum: libcmocka-devel }
+- { apt: libdrm-dev, yum: libdrm-devel }
+- { apt: libelf-dev, yum: elfutils-libelf-devel }
+- { apt: libffi-dev, yum: libffi-devel }
+- { apt: libibverbs-dev, yum: libibverbs-devel }
+- { apt: liblzma-dev, yum: xz-devel }
+- { apt: liburing-dev, yum: liburing-devel }
+- { apt: libncursesw5-dev, yum: ncurses-devel }
+- { apt: libnuma-dev, yum: numactl-devel }
+- { apt: libopenmpi-dev, yum: openmpi-devel }
+- { apt: librdmacm-dev, yum: librdmacm-devel }
+- { apt: libreadline-dev, yum: readline-devel }
+- { apt: libsqlite3-dev, yum: sqlite-devel }
+- { apt: libssl-dev, yum: openssl-devel }
+- { apt: libxml2-dev, yum: libxml2-devel }
+- { apt: libxmlsec1-dev, yum: xmlsec1-devel }
+- { apt: tk-dev, yum: tk-devel }
+- { apt: zlib1g-dev, yum: zlib-devel }
+
+- { apt: ibverbs-utils, yum: infiniband-diags }
+- { apt: openmpi-bin, yum: openmpi }
+- { apt: perftest, yum: perftest }
+- { apt: rdma-core, yum: rdma-core }
+
+- { apt: nfs-common, yum: nfs-utils }
+- { apt: nfs4-acl-tools, yum: nfs4-acl-tools }
+- { apt: zfsutils-linux, yum: zfs }
+
+- { apt: curl, yum: curl }
+- { apt: dnsutils, yum: bind-utils }
+- { apt: iproute2, yum: iproute }
+- { apt: iputils-ping, yum: iputils }
+- { apt: net-tools, yum: net-tools }
+- { apt: telnet, yum: telnet }
+- { apt: traceroute, yum: traceroute }
+- { apt: wget, yum: wget }
+
+packages_extra: []
+
+packages_denied:
+- { apt: clang, yum: clang }
+- { apt: gnome-shell, yum: gnome-shell }

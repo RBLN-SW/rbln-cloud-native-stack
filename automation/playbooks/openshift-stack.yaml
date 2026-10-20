@@ -1,0 +1,10 @@
+---
+# openshift-stack.yaml — Configures the RCNS stack on an existing OpenShift cluster (does not install the cluster).
+#
+#   ansible-playbook openshift-stack.yaml \
+#     -e @../values/rcns_openshift_values_<OpenShift version>.yaml -e kubeconfig=<OpenShift kubeconfig> \
+#     [-e rbln_registry_username=<account> -e rbln_registry_password=<password>] [-e enable_nfd=false]
+- import_playbook: npu-operator-olm.yaml
+  when: enable_npu_operator | default(true) | bool
+
+- import_playbook: addons.yaml

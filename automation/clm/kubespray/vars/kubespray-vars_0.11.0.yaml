@@ -1,0 +1,24 @@
+# RCNS 0.11.0 Kubespray extra vars — pairs with the values file rcns_values_0.11.0.yaml.
+kube_version: 1.35.9
+download_retries: 10
+retry_stagger: 30
+container_manager: containerd
+containerd_version: 2.3.4
+# Control plane VIP (kube-vip) — disabled by default. The cluster is reached at the first control plane node.
+# Enable the lines below only with multiple control plane nodes and a free IP reserved on the network
+# (192.0.2.10 is a documentation example — used as is, workers try to join an address that does not exist).
+kube_vip_enabled: false
+# kube_vip_enabled: true
+# kube_vip_controlplane_enabled: true
+# kube_vip_arp_enabled: true
+# kube_vip_address: 192.0.2.10
+# kube_proxy_strict_arp: true
+# loadbalancer_apiserver:
+#   address: 192.0.2.10
+#   port: 6443
+kube_pods_subnet: 10.244.0.0/16
+kube_service_addresses: 10.96.0.0/12
+kubeconfig_localhost: true
+kube_network_plugin: calico
+calico_version: "3.31.5"
+pkg_install_timeout: 900

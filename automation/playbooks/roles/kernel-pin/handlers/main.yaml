@@ -1,0 +1,51 @@
+---
+- name: Update GRUB
+  ansible.builtin.command:
+    cmd: update-grub
+  become: true
+
+- name: Update initramfs
+  ansible.builtin.command:
+    cmd: update-initramfs -u -k "{{ kernel_pin_version }}"
+  become: true
+
+- name: Reboot after kernel pin
+  ansible.builtin.reboot:
+  become: true
+  register: kernel_pin_reboot
+  failed_when:
+    - kernel_pin_reboot is failed
+    - "'is destructive' not in (kernel_pin_reboot.msg | default(''))"
+  when:
+    - kernel_pin_reboot_enabled | bool
+    - ansible_kernel != kernel_pin_version
+
+- name: Wait out the reboot that was already in flight
+  ansible.builtin.wait_for_connection:
+    delay: 30
+    sleep: 5
+    timeout: 600
+  when:
+    - kernel_pin_reboot_enabled | bool
+    - kernel_pin_reboot is not skipped
+    - not (kernel_pin_reboot.rebooted | default(true))
+
+- name: Re-read the running kernel after the in-flight reboot
+  ansible.builtin.command: uname -r
+  register: kernel_pin_uname_after
+  changed_when: false
+  when:
+    - kernel_pin_reboot_enabled | bool
+    - kernel_pin_reboot is not skipped
+    - not (kernel_pin_reboot.rebooted | default(true))
+
+- name: Assert the in-flight reboot landed on the pinned kernel
+  ansible.builtin.assert:
+    that: kernel_pin_uname_after.stdout == kernel_pin_version
+    fail_msg: >-
+      The node rebooted but runs {{ kernel_pin_uname_after.stdout }} (pinned {{ kernel_pin_version }}) —
+      an earlier shutdown was not a reboot, or the GRUB default entry did not take effect.
+  when:
+    - kernel_pin_reboot_enabled | bool
+    - kernel_pin_reboot is not skipped
+    - not (kernel_pin_reboot.rebooted | default(true))
